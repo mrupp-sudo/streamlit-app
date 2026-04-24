@@ -16,48 +16,6 @@ from youtube_transcript_api._errors import (
 )
 
 
-# =========================
-# GLOBAL SESSION (reused)
-# =========================
-SESSION = requests.Session()
-
-# lighter + compressed requests
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0",
-    "Accept-Encoding": "gzip, deflate",
-})
-
-
-def configure_proxy_once():
-    """
-    Configure proxy once per app run (reuses TCP + TLS connection)
-    """
-    if "proxy_configured" in st.session_state:
-        return
-
-    proxy_user = st.secrets["WEBshare_username"]
-    proxy_pass = st.secrets["WEBshare_password"]
-    proxy_host = st.secrets["WEBshare_host"]
-    proxy_port = st.secrets["WEBshare_port"]
-
-    proxy = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
-
-    SESSION.proxies.update({
-        "http": proxy,
-        "https": proxy,
-    })
-
-    st.session_state["proxy_configured"] = True
-
-
-def build_api():
-    configure_proxy_once()
-    return YouTubeTranscriptApi(http_client=SESSION)
-
-
-# =========================
-# DATA STRUCTURES
-# =========================
 @dataclass(frozen=True)
 class TranscriptResult:
     video_id: str
@@ -67,9 +25,6 @@ class TranscriptResult:
 _YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
-# =========================
-# HELPERS
-# =========================
 def extract_video_id(raw_url: str) -> Optional[str]:
     raw_url = (raw_url or "").strip()
     if not raw_url:
@@ -102,20 +57,44 @@ def extract_video_id(raw_url: str) -> Optional[str]:
     return None
 
 
-# =========================
-# CORE LOGIC
-# =========================
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)  # 24h cache
+def build_api():
+    """
+    Build YouTubeTranscriptApi with Webshare proxy from Streamlit secrets
+    """
+
+    # 🔐 load secrets
+    proxy_user = st.secrets["WEBshare_username"]
+    proxy_pass = st.secrets["WEBshare_password"]
+    proxy_host = st.secrets["WEBshare_host"]
+    proxy_port = st.secrets["WEBshare_port"]
+
+    proxy = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+
+    session = requests.Session()
+    session.proxies.update({
+        "http": proxy,
+        "https": proxy,
+    })
+
+    return YouTubeTranscriptApi(http_client=session)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
 def fetch_transcript_text(video_id: str) -> TranscriptResult:
     languages = [
-        "en", "en-US", "en-GB",
-        "de", "de-DE", "de-AT", "de-CH",
+        "en",
+        "en-US",
+        "en-GB",
+        "de",
+        "de-DE",
+        "de-AT",
+        "de-CH",
     ]
 
     api = build_api()
 
-    # 🔁 smarter retry (only 2 attempts)
-    for attempt in range(2):
+    # 🔁 retry (important for proxies + YouTube)
+    for attempt in range(3):
         try:
             transcript_items = api.fetch(
                 video_id,
@@ -129,22 +108,14 @@ def fetch_transcript_text(video_id: str) -> TranscriptResult:
             first_transcript = next(iter(transcript_list), None)
             if first_transcript is None:
                 raise
-
             transcript_items = first_transcript.fetch(
                 preserve_formatting=False
             ).to_raw_data()
             break
 
-        except (requests.exceptions.ProxyError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
-            # retry only on network issues
-            if attempt == 1:
-                raise
-
         except Exception:
-            # don't retry unknown logic errors
-            raise
+            if attempt == 2:
+                raise
 
     text = "\n".join(
         item.get("text", "").strip()
@@ -155,9 +126,6 @@ def fetch_transcript_text(video_id: str) -> TranscriptResult:
     return TranscriptResult(video_id=video_id, text=text.strip())
 
 
-# =========================
-# UI
-# =========================
 def main() -> None:
     st.set_page_config(page_title="YouTube Transcript", page_icon="📝", layout="centered")
 
@@ -205,4 +173,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
